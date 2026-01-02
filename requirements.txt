@@ -3,3 +3,5 @@ python-telegram-bot[job-queue]==20.7
 python-dotenv==1.0.0
 firebase-admin==6.5.0
 google-cloud-firestore==2.13.0
+httpx==0.25.2
+APScheduler==3.10.4
