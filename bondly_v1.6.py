@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Bot version
 BOT_VERSION = "1.8"
 
-# ==================== PROFESSIONAL DATABASE (با Supabase) ====================
+# ==================== PROFESSIONAL DATABASE ====================
 import os
 import psycopg2
 from psycopg2 import pool
@@ -63,7 +63,7 @@ class ProfessionalDB:
                 return
             
             self.db_pool = psycopg2.pool.SimpleConnectionPool(1, 5, DATABASE_URL)
-            print("✅ Connected to Supabase database successfully!")
+            print("✅ Connected to database successfully!")
         except Exception as e:
             print(f"❌ Database connection failed: {e}")
             print("Make sure DATABASE_URL is correct in Render Environment Variables")
@@ -147,7 +147,6 @@ class ProfessionalDB:
         finally:
             self.db_pool.putconn(conn)
     
-    # User management methods
     def get_user(self, user_id: int) -> Optional[Dict]:
         if not self.db_pool:
             return None
@@ -175,12 +174,10 @@ class ProfessionalDB:
         conn = self.db_pool.getconn()
         try:
             with conn.cursor() as cur:
-                # Check if user exists
                 cur.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
                 exists = cur.fetchone()
                 
                 if exists:
-                    # Update existing user
                     cur.execute("""
                         UPDATE users SET
                             nickname = %s,
@@ -204,7 +201,6 @@ class ProfessionalDB:
                         user_id
                     ))
                 else:
-                    # Insert new user
                     cur.execute("""
                         INSERT INTO users 
                         (user_id, nickname, gender, gender_display, search_filter, 
@@ -229,10 +225,241 @@ class ProfessionalDB:
         finally:
             self.db_pool.putconn(conn)
     
-    # ادامه متدهای دیگر (get_stats, update_stats, get_blocked_users, block_user, unblock_user, is_blocked, save_chat)
-    # باید همه را به همین شکل به پایگاه داده وصل کنی...
+    def get_stats(self, user_id: int) -> Dict:
+        if not self.db_pool:
+            return {}
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM user_stats WHERE user_id = %s", (user_id,))
+                row = cur.fetchone()
+                if row:
+                    columns = [desc[0] for desc in cur.description]
+                    return dict(zip(columns, row))
+                
+                # Create new stats if not exists
+                cur.execute("""
+                    INSERT INTO user_stats (user_id) VALUES (%s) 
+                    ON CONFLICT (user_id) DO NOTHING RETURNING *
+                """, (user_id,))
+                
+                row = cur.fetchone()
+                if row:
+                    columns = [desc[0] for desc in cur.description]
+                    return dict(zip(columns, row))
+                
+                return {}
+        except Exception as e:
+            print(f"Error getting stats {user_id}: {e}")
+            return {}
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def update_stats(self, user_id: int, stat_type: str, value: int = 1):
+        if not self.db_pool:
+            return
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Check if stats exist
+                cur.execute("SELECT user_id FROM user_stats WHERE user_id = %s", (user_id,))
+                if not cur.fetchone():
+                    cur.execute("INSERT INTO user_stats (user_id) VALUES (%s)", (user_id,))
+                
+                # Update specific stat
+                if stat_type == 'last_active':
+                    cur.execute("UPDATE user_stats SET last_active = CURRENT_TIMESTAMP WHERE user_id = %s", (user_id,))
+                elif stat_type == 'chats_today':
+                    cur.execute("""
+                        UPDATE user_stats SET chats_today = chats_today + %s 
+                        WHERE user_id = %s AND last_reset = CURRENT_DATE
+                    """, (value, user_id))
+                elif stat_type == 'total_chat_duration':
+                    cur.execute("UPDATE user_stats SET total_chat_duration = total_chat_duration + %s WHERE user_id = %s", (value, user_id))
+                else:
+                    # For other stats like messages_sent, chats_started, etc.
+                    cur.execute(f"UPDATE user_stats SET {stat_type} = {stat_type} + %s WHERE user_id = %s", (value, user_id))
+                
+                conn.commit()
+        except Exception as e:
+            print(f"Error updating stats {user_id}: {e}")
+            conn.rollback()
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def get_blocked_users(self, user_id: int) -> Dict:
+        if not self.db_pool:
+            return {}
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT blocked_id, nickname FROM blocked_users 
+                    WHERE blocker_id = %s
+                """, (user_id,))
+                
+                blocked = {}
+                for row in cur.fetchall():
+                    blocked[row[0]] = {'nickname': row[1]}
+                
+                return blocked
+        except Exception as e:
+            print(f"Error getting blocked users {user_id}: {e}")
+            return {}
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def block_user(self, blocker_id: int, blocked_id: int, nickname: str):
+        if not self.db_pool:
+            return False
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO blocked_users (blocker_id, blocked_id, nickname)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (blocker_id, blocked_id) DO NOTHING
+                """, (blocker_id, blocked_id, nickname))
+                
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"Error blocking user {blocked_id}: {e}")
+            conn.rollback()
+            return False
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def unblock_user(self, blocker_id: int, blocked_id: int) -> bool:
+        if not self.db_pool:
+            return False
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM blocked_users 
+                    WHERE blocker_id = %s AND blocked_id = %s
+                """, (blocker_id, blocked_id))
+                
+                conn.commit()
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"Error unblocking user {blocked_id}: {e}")
+            conn.rollback()
+            return False
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def is_blocked(self, blocker_id: int, blocked_id: int) -> bool:
+        if not self.db_pool:
+            return False
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM blocked_users 
+                    WHERE blocker_id = %s AND blocked_id = %s
+                """, (blocker_id, blocked_id))
+                
+                return cur.fetchone() is not None
+        except Exception as e:
+            print(f"Error checking blocked {blocked_id}: {e}")
+            return False
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def save_chat(self, chat_data: Dict):
+        if not self.db_pool:
+            return
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO chat_history 
+                    (user1_id, user2_id, user1_data, user2_data, messages_sent_user1, 
+                     messages_sent_user2, media_sent, active, created, ended, reason, duration)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    chat_data.get('user1', {}).get('id'),
+                    chat_data.get('user2', {}).get('id'),
+                    json.dumps(chat_data.get('user1', {}).get('data', {})),
+                    json.dumps(chat_data.get('user2', {}).get('data', {})),
+                    chat_data.get('messages_sent_user1', 0),
+                    chat_data.get('messages_sent_user2', 0),
+                    chat_data.get('media_sent', 0),
+                    chat_data.get('active', False),
+                    chat_data.get('created'),
+                    chat_data.get('ended'),
+                    chat_data.get('reason', ''),
+                    chat_data.get('duration', 0)
+                ))
+                
+                conn.commit()
+        except Exception as e:
+            print(f"Error saving chat: {e}")
+            conn.rollback()
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def delete_user(self, user_id: int):
+        if not self.db_pool:
+            return
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
+                conn.commit()
+        except Exception as e:
+            print(f"Error deleting user {user_id}: {e}")
+            conn.rollback()
+        finally:
+            self.db_pool.putconn(conn)
+    
+    def get_global_stats(self) -> Dict:
+        if not self.db_pool:
+            return {}
+        
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                stats = {}
+                
+                # Total users
+                cur.execute("SELECT COUNT(*) FROM users")
+                stats['total_users'] = cur.fetchone()[0] or 0
+                
+                # Total messages
+                cur.execute("SELECT COALESCE(SUM(messages_sent), 0) FROM user_stats")
+                stats['total_messages'] = cur.fetchone()[0] or 0
+                
+                # Total chats
+                cur.execute("SELECT COALESCE(SUM(chats_started), 0) FROM user_stats")
+                stats['total_chats'] = cur.fetchone()[0] or 0
+                
+                # Total ratings
+                cur.execute("SELECT COALESCE(SUM(ratings_positive), 0) FROM user_stats")
+                stats['total_positive_ratings'] = cur.fetchone()[0] or 0
+                
+                cur.execute("SELECT COALESCE(SUM(ratings_negative), 0) FROM user_stats")
+                stats['total_negative_ratings'] = cur.fetchone()[0] or 0
+                
+                return stats
+        except Exception as e:
+            print(f"Error getting global stats: {e}")
+            return {}
+        finally:
+            self.db_pool.putconn(conn)
 
 db = ProfessionalDB()
+
 # ==================== PROFESSIONAL CHAT MANAGER ====================
 class ProfessionalChatManager:
     def __init__(self):
@@ -469,28 +696,19 @@ def clean_nickname(nickname: str) -> str:
     if not nickname:
         return "User"
     
-    # Remove @ symbol if present
     nickname = nickname.replace('@', '')
-    
-    # Remove special characters but keep letters, numbers, spaces, and underscores
     nickname = re.sub(r'[^\w\s]', '', nickname, flags=re.UNICODE)
-    
-    # Remove extra spaces
     nickname = ' '.join(nickname.split())
-    
-    # Capitalize first letter of each word
     nickname = nickname.title()
     
-    return nickname[:20]  # Limit to 20 characters
+    return nickname[:20]
 
 def generate_nickname(user: Update.effective_user) -> str:
     """Generate nickname from Telegram profile - IMPROVED VERSION"""
-    # Priority 1: Username (without @)
     if user.username:
         nickname = user.username.replace('@', '')
         return clean_nickname(nickname)
     
-    # Priority 2: First name + last name
     if user.first_name:
         if user.last_name:
             nickname = f"{user.first_name} {user.last_name}"
@@ -498,11 +716,9 @@ def generate_nickname(user: Update.effective_user) -> str:
             nickname = user.first_name
         return clean_nickname(nickname)
     
-    # Priority 3: Just first name
     if user.first_name:
         return clean_nickname(user.first_name)
     
-    # Priority 4: Generate random name
     adjectives = ["Cool", "Smart", "Happy", "Funny", "Brave", "Kind", "Wise", "Gentle"]
     nouns = ["Tiger", "Eagle", "Dolphin", "Phoenix", "Wolf", "Lion", "Dragon", "Bear"]
     
@@ -513,10 +729,8 @@ def generate_nickname(user: Update.effective_user) -> str:
 
 def auto_register_user(user_id: int, user: Update.effective_user) -> Dict:
     """Automatically register a user with improved nickname system"""
-    # Generate nickname from username/name
     nickname = generate_nickname(user)
     
-    # Create user data with default values
     user_data = {
         'nickname': nickname,
         'gender': 'not_specified',
@@ -530,10 +744,7 @@ def auto_register_user(user_id: int, user: Update.effective_user) -> Dict:
         'auto_registered': True
     }
     
-    # Save user
     db.save_user(user_id, user_data)
-    
-    # Initialize stats
     db.update_stats(user_id, 'chats_started', 0)
     
     return user_data
@@ -560,7 +771,6 @@ def format_profile(user_id: int, user_data: Dict) -> str:
     """Format profile in clean style"""
     stats = db.get_stats(user_id)
     
-    # Format registration date
     reg_date = user_data.get('registered', '')
     if reg_date:
         try:
@@ -699,7 +909,6 @@ async def leave_chat_from_callback(user_id: int, context: ContextTypes.DEFAULT_T
             except:
                 pass
         
-        # Send response based on how function was called
         if query:
             await query.edit_message_text(
                 f"""
@@ -735,14 +944,12 @@ async def start_search_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
             await query.answer("Please register first!", show_alert=True)
         return False
     
-    # Check if already in chat
     chat_id, chat = cm.get_chat(user_id)
     if chat:
         if query:
             await query.answer("You're already in a chat!", show_alert=True)
         return False
     
-    # Check if already searching
     if user_id in cm.waiting:
         waiting_count = cm.get_waiting_count() - 1
         filter_display = user_data.get('search_filter_display', 'Random')
@@ -750,18 +957,15 @@ async def start_search_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
             await query.answer(f"Already searching ({filter_display})... {waiting_count} people waiting", show_alert=True)
         return False
     
-    # Add to waiting list
     success, message = cm.add_to_waiting(user_id, user_data)
     if not success:
         if query:
             await query.answer(message, show_alert=True)
         return False
     
-    # Find match
     match = cm.find_match(user_id)
     
     if match:
-        # Create new chat
         chat_id = cm.create_chat(
             match['user1'], match['user2'],
             match['data1'], match['data2']
@@ -810,7 +1014,6 @@ async def start_search_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=buttons
             )
         
-        # Notify partner
         try:
             await context.bot.send_message(
                 partner_id,
@@ -829,7 +1032,6 @@ async def start_search_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
         
         return True
     else:
-        # No match found, show waiting message
         waiting_count = cm.get_waiting_count() - 1
         filter_display = user_data.get('search_filter_display', 'Random')
         
@@ -870,13 +1072,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
     
-    # Update last active
     db.update_stats(user_id, 'last_active')
     
     user_data = db.get_user(user_id)
     
     if not user_data:
-        # Auto-register the user
         user_data = auto_register_user(user_id, user)
         
         message = f"""
@@ -899,7 +1099,6 @@ You can start chatting immediately!
 Enjoy chatting! 😊
 """
     else:
-        # Already registered
         message = f"""
 🎉 Bondly Bot v{BOT_VERSION}
 
@@ -916,7 +1115,6 @@ Ready to chat with new people?
 👥 People waiting: {cm.get_waiting_count()}
 """
     
-    # Main menu
     main_menu = [
         ["🔍 Find Partner", "📊 Statistics"],
         ["👤 Profile", "⚙️ Settings"],
@@ -933,7 +1131,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -994,7 +1191,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=buttons
         )
         
-        # Notify partner
         try:
             await context.bot.send_message(
                 partner_id,
@@ -1148,7 +1344,6 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1161,7 +1356,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1174,7 +1368,6 @@ async def nickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1191,7 +1384,6 @@ async def nickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     new_nick = ' '.join(context.args).strip()
     
-    # Simple validation
     if not new_nick or len(new_nick) < 2:
         await update.message.reply_text("❌ Nickname must be at least 2 characters.")
         return
@@ -1200,11 +1392,9 @@ async def nickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Nickname cannot exceed 25 characters.")
         return
     
-    # Update nickname
     old_nick = user_data.get('nickname', '')
     user_data['nickname'] = new_nick
     
-    # Save the updated user data
     db.save_user(user_id, user_data)
     
     await update.message.reply_text(f"✅ Nickname updated from '{old_nick}' to '{new_nick}'")
@@ -1214,7 +1404,6 @@ async def gender_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1273,7 +1462,6 @@ async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1348,7 +1536,6 @@ async def blocked_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1381,7 +1568,6 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Auto-register if not registered
     if not user_data:
         user_data = auto_register_user(user_id, update.effective_user)
         await update.message.reply_text("✅ You have been automatically registered!")
@@ -1498,7 +1684,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "next":
             chat_id, chat = cm.get_chat(user_id)
             if chat:
-                # Notify current partner
                 partner = cm.get_partner(chat_id, user_id)
                 if partner:
                     try:
@@ -1509,10 +1694,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                 
-                # End current chat
                 cm.end_chat(chat_id, "next")
                 
-                # Start new search immediately
                 await start_search_for_user(user_id, context, query)
             else:
                 await query.answer("You're not in a chat!", show_alert=True)
@@ -1525,7 +1708,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     partner_nick = partner['data'].get('nickname', 'Unknown')
                     db.block_user(user_id, partner['id'], partner_nick)
                 
-                # Notify partner
                 if partner:
                     try:
                         await context.bot.send_message(
@@ -1535,17 +1717,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                 
-                # End current chat
                 cm.end_chat(chat_id, "blocked")
                 
-                # Start new search immediately
                 await query.edit_message_text("✅ User blocked. Searching for new partner...")
                 await start_search_for_user(user_id, context, query)
             else:
                 await query.answer("You're not in a chat!", show_alert=True)
         
         elif data == "leave":
-            # Use the corrected leave function
             await leave_chat_from_callback(user_id, context, query)
         
         elif data == "rate_good":
@@ -1709,23 +1888,18 @@ async def cleanup_task(context: ContextTypes.DEFAULT_TYPE):
 def main():
     import sys
     
-    # اگر فلگ clean-start داشتیم، offset را ریست کنیم
     if '--clean-start' in sys.argv:
         print("🔄 Performing clean start...")
-        # ریست کردن آخرین update_id برای جلوگیری از conflict
         import asyncio
         from telegram import Bot
         
         async def reset_updates():
             bot = Bot(token=TOKEN)
             try:
-                # گرفتن updates با drop_pending_updates=True
-                # این باعث می‌شد سرور تلگرام آخرین update_id ما را فراموش کند
                 await bot.get_updates(offset=-1, timeout=1)
                 print("✅ Reset Telegram updates offset")
             except Exception as e:
                 print(f"⚠️ Could not reset updates: {e}")
-                # تلاش دوم با روش جایگزین
                 try:
                     await bot.delete_webhook(drop_pending_updates=True)
                     print("✅ Used webhook cleanup method")
@@ -1745,15 +1919,12 @@ def main():
     print("Starting bot...")
     print("="*60)
     
-    # ===== بخش جدید: بررسی وجود بات دیگر =====
-    print("🔍 Checking for other bot instances...")
     import asyncio
     from telegram import Bot
     
     async def check_conflict():
         bot = Bot(token=TOKEN)
         try:
-            # یک تست سریع برای دیدن اگر بات دیگری در حال اجراست
             test = await bot.get_updates(timeout=2, limit=1)
             print("✅ No conflict detected")
             return False
@@ -1774,11 +1945,8 @@ def main():
         print("3. Wait 1 minute, then restart")
         sys.exit(1)
     
-    # ===== ادامه کد اصلی =====
-    # Create application
     app = Application.builder().token(TOKEN).build()
     
-    # Add handlers (همان کدهای قبلی...)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("search", search))
@@ -1792,28 +1960,23 @@ def main():
     app.add_handler(CommandHandler("blocked", blocked_command))
     app.add_handler(CommandHandler("settings", settings_command))
     
-    # Callback handler
     app.add_handler(CallbackQueryHandler(callback_handler))
     
-    # Menu buttons
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r'^(🔍 Find Partner|📊 Statistics|👤 Profile|⚙️ Settings|❓ Help)$'),
         handle_menu
     ))
     
-    # Media handlers
     app.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.VOICE | filters.Sticker.ALL,
         handle_media
     ))
     
-    # Text messages (must be last)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         handle_text
     ))
     
-    # Add job queue for cleanup
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(cleanup_task, interval=60, first=30)
@@ -1827,15 +1990,13 @@ def main():
     print("4. ✅ Next partner button: Instantly connects to new partner")
     print("="*60)
     
-    # ===== بخش جدید: توقف ایمن =====
     print("\n💡 Tips:")
     print("- Use /start to begin")
     print("- If bot crashes, wait 60s before restarting")
     print("- Check logs in Render dashboard")
     
-    # Run bot با drop_pending_updates=True برای پاک کردن صف قدیمی
     app.run_polling(
-        drop_pending_updates=True,  # این مهم است!
+        drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
         close_loop=False
     )
